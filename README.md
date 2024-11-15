@@ -12,6 +12,8 @@
 $ npm install
 ```
 
+## Ask for .env file
+
 ## Compile and run the project
 
 ```bash
