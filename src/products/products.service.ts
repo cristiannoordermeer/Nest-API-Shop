@@ -3,8 +3,9 @@ import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Product } from './entities/product.entity';
-import { Repository } from 'typeorm';
+import { DataSource, Repository } from 'typeorm';
 import { PaginationDto } from 'src/common/dtos/pagination.dto';
+import { ProductImage } from './entities/product-images.entity';
 
 @Injectable()
 export class ProductsService {
@@ -12,29 +13,43 @@ export class ProductsService {
   private readonly logger = new Logger('Product Service');
   constructor(
     @InjectRepository(Product)
-    private readonly productRepository: Repository<Product>
+    private readonly productRepository: Repository<Product>,
+    @InjectRepository(ProductImage)
+    private readonly productImageRepository: Repository<ProductImage>,
+    private readonly dataSource: DataSource
   ) {}
 
   async create(createProductDto: CreateProductDto) {
 
     try {
-      const product = this.productRepository.create(createProductDto);  /// regiter creation
+      const {images = [], ...productDetails} = createProductDto;
+      const product = this.productRepository.create({
+        ...productDetails,
+        images: images.map( image => this.productImageRepository.create({url: image}))
+      });  /// regiter creation
       await this.productRepository.save(product);                       /// save it to DB
 
-      return product;
+      return {...product, images};
     } catch (error) {
       this.handleExceptions(error);
     }
-    return
   }
 
   async findAll(pagination: PaginationDto) {
     const {limit=10, offset=0} = pagination;
     const products = await this.productRepository.find({
       take: limit,
-      skip: offset
+      skip: offset,
+      relations: {
+        images: true
+      }
     });
-    return products;
+    return products.map( (product: Product) => {
+      return {
+        ...product,
+        images: product.images.map(img => img.url)
+      }
+    });
   }
 
   async  findOne(id: string) {
@@ -46,20 +61,40 @@ export class ProductsService {
   }
 
   async update(id: string, updateProductDto: UpdateProductDto) { 
+    const {images, ...toUpdate} = updateProductDto;
     const product = await this.productRepository.preload({
       id: id,
-      ...updateProductDto
+      ...toUpdate
     });
 
     if (!product) {
       throw new NotFoundException(`product with id ${id} not found`);
     }
 
+    //create queryRunner
+    const queryRunner = this.dataSource.createQueryRunner();
+
+    await queryRunner.connect();
+    await queryRunner.startTransaction();
     try {
-      await this.productRepository.save(product);
+
+      if (images) {                                                     //if images are coming, I  want to delete the current ones for the product and  insert the new ones
+        await queryRunner.manager.delete(ProductImage, {product: {id}});
+
+        product.images = images.map(img => this.productImageRepository.create({url: img}));
+      } else {
+        product.images = await this.productImageRepository.findBy({product: {id}});    // if images are not coming, I get the current ones
+      }
+      await queryRunner.manager.save(product);
+
+      await queryRunner.commitTransaction();
+      await queryRunner.release();
+
       return product;
   
     } catch (error) {
+      await queryRunner.rollbackTransaction();
+      await queryRunner.release();
       this.handleExceptions(error);
     }
   }
